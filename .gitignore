@@ -1,34 +1,31 @@
-# Gradle files
-.gradle/
-build/
+# ============================================================
+#  .gitignore — my-budget
+#  ⚠️ Ne JAMAIS committer de données bancaires réelles.
+# ============================================================
 
-# Local configuration file (sdk path, etc)
-local.properties
+# Sauvegardes exportées par l'application (contiennent tes vraies
+# transactions, soldes et libellés bancaires). NE PAS versionner.
+mon-budget-*.json
+*sauvegarde*.json
+*backup*.json
 
-# Log/OS Files
-*.log
+# Extraits de compte bruts (PDF / CSV / XLSX) — données sensibles
+*.pdf
+*.csv
+*.xls
+*.xlsx
+*.tsv
+extraits/
+releves/
+data/
 
-# Android Studio generated files and folders
-captures/
-.externalNativeBuild/
-.cxx/
-*.aab
-*.apk
-output-metadata.json
-
-# IntelliJ
-*.iml
+# Fichiers système / éditeur
+.DS_Store
+Thumbs.db
+*.swp
+*~
+.vscode/
 .idea/
-misc.xml
-deploymentTargetDropDown.xml
-render.experimental.xml
 
-# Keystore files
-*.jks
-*.keystore
-
-# Google Services (e.g. APIs or Firebase)
-google-services.json
-
-# Android Profiling
-*.hprof
+# Dépendances éventuelles (si un jour build local)
+node_modules/
