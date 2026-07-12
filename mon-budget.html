@@ -16,6 +16,7 @@
 /* ---------- Thème & variables ---------- */
 /* Thème SOMBRE (par défaut) */
 :root{
+  color-scheme:dark;      /* aligne les contrôles natifs (date picker, scrollbars) sur le thème */
   --bg:#0f1419;            /* fond principal très sombre bleu-nuit */
   --bg-2:#161d26;         /* cartes */
   --bg-3:#1e2733;         /* éléments interactifs */
@@ -35,6 +36,7 @@
 }
 /* Thème CLAIR */
 :root[data-theme="light"]{
+  color-scheme:light;
   --bg:#f4f2ec;            /* crème doux */
   --bg-2:#ffffff;          /* cartes blanches */
   --bg-3:#f0ede4;          /* éléments interactifs */
@@ -254,7 +256,7 @@ table.wide{min-width:640px}
 
 <main id="app"><!-- Vues injectées par JS --></main>
 
-<div id="toast"></div>
+<div id="toast" role="status" aria-live="polite" aria-atomic="true"></div>
 
 <!-- SheetJS : lecture des fichiers .xlsx / .xls (import bancaire) -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
@@ -386,6 +388,14 @@ function fmt(n){
 function norm(s){
   return (s||"").toString().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g,"").trim();
 }
+/* \u00c9chappement HTML : donn\u00e9es utilisateur/bancaires ins\u00e9r\u00e9es via innerHTML.
+   Indispensable \u2014 un libell\u00e9 de relev\u00e9 peut contenir <, >, &, " ou ' et
+   ne doit jamais \u00eatre interpr\u00e9t\u00e9 comme du balisage (protection XSS + rendu correct).
+   Couvre \u00e0 la fois le contenu texte et les valeurs d'attributs entre guillemets. */
+const ENTITES_HTML = {"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"};
+function esc(s){
+  return (s==null?"":String(s)).replace(/[&<>"']/g, ch=>ENTITES_HTML[ch]);
+}
 function catObj(nom){ return etat.categories.find(c=>c.nom===nom) || {nom:"Non classé",type:"depense",couleur:"#6b7684"}; }
 function couleurCat(nom){ return catObj(nom).couleur; }
 function typeCat(nom){ return catObj(nom).type; }
@@ -436,12 +446,15 @@ function parseCSV(texte){
     const cells=[]; let cur="",dansGuil=false;
     for(let i=0;i<l.length;i++){
       const ch=l[i];
-      if(ch==='"'){ dansGuil=!dansGuil; }
+      if(ch==='"'){
+        if(dansGuil && l[i+1]==='"'){ cur+='"'; i++; }  // "" = guillemet littéral échappé
+        else dansGuil=!dansGuil;
+      }
       else if(ch===sep && !dansGuil){ cells.push(cur); cur=""; }
       else cur+=ch;
     }
     cells.push(cur);
-    return cells.map(c=>c.trim().replace(/^"|"$/g,""));
+    return cells.map(c=>c.trim());
   });
 }
 /* Convertit un montant texte (formats FR/BE/EN) en nombre.
@@ -866,9 +879,9 @@ function vueAnnuel(){
     ${top.length? `<table class="wide"><thead><tr><th style="width:40px">#</th><th>Catégorie</th><th class="num">Réel</th><th style="width:35%">Part</th></tr></thead><tbody>
       ${top.map(([c,v],i)=>`<tr>
         <td class="muted">${i+1}</td>
-        <td><span class="legend-dot" style="display:inline-block;background:${couleurCat(c)};margin-right:8px"></span>${c}</td>
+        <td><span class="legend-dot" style="display:inline-block;background:${esc(couleurCat(c))};margin-right:8px"></span>${esc(c)}</td>
         <td class="num">${fmt(v)}</td>
-        <td><div class="cat-bar"><span style="width:${(v/maxTop*100).toFixed(1)}%;background:${couleurCat(c)}"></span></div></td>
+        <td><div class="cat-bar"><span style="width:${(v/maxTop*100).toFixed(1)}%;background:${esc(couleurCat(c))}"></span></div></td>
       </tr>`).join("")}
     </tbody></table>`
     : '<div class="empty">Importez vos relevés ou ajoutez des transactions pour voir le récapitulatif.</div>'}
@@ -889,7 +902,7 @@ function vueMensuelle(){
     const prog= prevu>0 ? (reel/prevu*100) : null;
     const cls = prog===null?'':(prog>100?'over':'under');
     return `<tr>
-      <td><span class="legend-dot" style="display:inline-block;background:${couleurCat(c)};margin-right:8px"></span>${c}<span class="badge" style="margin-left:8px">${typeCat(c)}</span></td>
+      <td><span class="legend-dot" style="display:inline-block;background:${esc(couleurCat(c))};margin-right:8px"></span>${esc(c)}<span class="badge" style="margin-left:8px">${esc(typeCat(c))}</span></td>
       <td class="num muted">${prevu?fmt(prevu):'—'}</td>
       <td class="num">${fmt(reel)}</td>
       <td class="num progress-cell ${cls}">${prog!==null?prog.toFixed(0)+' %':'—'}</td>
@@ -919,18 +932,18 @@ function vueMensuelle(){
 
 /* ---------- Vue : Transactions ---------- */
 function vueTransactions(){
-  const opts = etat.categories.map(c=>`<option value="${c.nom}">${c.nom}</option>`).join("");
+  const opts = etat.categories.map(c=>`<option value="${esc(c.nom)}">${esc(c.nom)}</option>`).join("");
   const tx=[...etat.transactions].sort((a,b)=> (b.date||"").localeCompare(a.date||""));
   const lignes = tx.map(t=>{
     const ty=typeCat(t.categorie);
     const signe = (ty==="revenu") ? '+' : '−';
     const cls = (ty==="revenu")?'pos':'neg';
-    return `<tr data-id="${t.id}">
-      <td style="white-space:nowrap">${t.date||''}</td>
-      <td>${t.libelle||''}</td>
-      <td><select class="cat-select" data-id="${t.id}">${etat.categories.map(c=>`<option value="${c.nom}" ${c.nom===t.categorie?'selected':''}>${c.nom}</option>`).join("")}</select></td>
-      <td class="num ${cls}" style="white-space:nowrap">${signe} ${fmt(Math.abs(t.montant)).replace(' '+dev(),'')} ${dev()}</td>
-      <td class="muted" style="font-size:.72rem">${t.source||''}</td>
+    return `<tr data-id="${esc(t.id)}">
+      <td style="white-space:nowrap">${esc(t.date||'')}</td>
+      <td>${esc(t.libelle||'')}</td>
+      <td><select class="cat-select" data-id="${esc(t.id)}">${etat.categories.map(c=>`<option value="${esc(c.nom)}" ${c.nom===t.categorie?'selected':''}>${esc(c.nom)}</option>`).join("")}</select></td>
+      <td class="num ${cls}" style="white-space:nowrap">${signe} ${fmt(Math.abs(t.montant)).replace(' '+dev(),'')} ${esc(dev())}</td>
+      <td class="muted" style="font-size:.72rem">${esc(t.source||'')}</td>
       <td><button class="icon-btn btn-suppr" data-id="${t.id}" title="Supprimer">🗑</button></td>
     </tr>`;
   }).join("");
@@ -986,14 +999,14 @@ function vueImport(){
 /* ---------- Vue : Catégories & règles ---------- */
 function vueCategories(){
   const cats = etat.categories.map((c,i)=>`<tr>
-    <td><span class="legend-dot" style="display:inline-block;background:${c.couleur};margin-right:8px"></span>${c.nom}</td>
-    <td><span class="badge">${c.type}</span></td>
-    <td><input type="color" value="${c.couleur}" data-cat="${i}" class="col-cat" style="width:44px;height:28px;padding:2px;border-radius:6px"></td>
+    <td><span class="legend-dot" style="display:inline-block;background:${esc(c.couleur)};margin-right:8px"></span>${esc(c.nom)}</td>
+    <td><span class="badge">${esc(c.type)}</span></td>
+    <td><input type="color" value="${esc(c.couleur)}" data-cat="${i}" class="col-cat" style="width:44px;height:28px;padding:2px;border-radius:6px"></td>
     <td><button class="icon-btn btn-suppr-cat" data-i="${i}" title="Supprimer">🗑</button></td>
   </tr>`).join("");
   const regles = etat.regles.map((r,i)=>`<tr>
-    <td><input type="text" value="${r.motcle}" data-regle="${i}" data-champ="motcle" class="reg-input"></td>
-    <td><select data-regle="${i}" data-champ="categorie" class="reg-input">${etat.categories.map(c=>`<option value="${c.nom}" ${c.nom===r.categorie?'selected':''}>${c.nom}</option>`).join("")}</select></td>
+    <td><input type="text" value="${esc(r.motcle)}" data-regle="${i}" data-champ="motcle" class="reg-input"></td>
+    <td><select data-regle="${i}" data-champ="categorie" class="reg-input">${etat.categories.map(c=>`<option value="${esc(c.nom)}" ${c.nom===r.categorie?'selected':''}>${esc(c.nom)}</option>`).join("")}</select></td>
     <td><button class="icon-btn btn-suppr-regle" data-i="${i}" title="Supprimer">🗑</button></td>
   </tr>`).join("");
 
@@ -1013,7 +1026,7 @@ function vueCategories(){
       <div class="section-title"><span class="dot"></span>Règles de catégorisation auto</div>
       <div class="form-row" style="margin-bottom:14px">
         <label class="field" style="grid-column:span 2"><span>Mot-clé (dans le libellé)</span><input type="text" id="regMot" placeholder="ex. delhaize"></label>
-        <label class="field"><span>Catégorie</span><select id="regCat">${etat.categories.map(c=>`<option value="${c.nom}">${c.nom}</option>`).join("")}</select></label>
+        <label class="field"><span>Catégorie</span><select id="regCat">${etat.categories.map(c=>`<option value="${esc(c.nom)}">${esc(c.nom)}</option>`).join("")}</select></label>
         <label class="field"><span>&nbsp;</span><button class="btn btn-primary" id="btnAddRegle" style="width:100%">+ Ajouter</button></label>
       </div>
       <div class="scroll-x"><table><thead><tr><th>Si le libellé contient…</th><th>→ Catégorie</th><th></th></tr></thead><tbody>${regles}</tbody></table></div>
@@ -1025,9 +1038,9 @@ function vueCategories(){
 /* ---------- Vue : Budget prévu ---------- */
 function vueBudget(){
   const lignes = etat.categories.filter(c=>c.type!=="revenu").map(c=>`<tr>
-    <td><span class="legend-dot" style="display:inline-block;background:${c.couleur};margin-right:8px"></span>${c.nom}</td>
-    <td><span class="badge">${c.type}</span></td>
-    <td style="width:180px"><input type="text" value="${etat.budgets[c.nom]||''}" data-budget="${c.nom}" class="budget-input" placeholder="0,00" style="text-align:right"></td>
+    <td><span class="legend-dot" style="display:inline-block;background:${esc(c.couleur)};margin-right:8px"></span>${esc(c.nom)}</td>
+    <td><span class="badge">${esc(c.type)}</span></td>
+    <td style="width:180px"><input type="text" value="${esc(etat.budgets[c.nom]||'')}" data-budget="${esc(c.nom)}" class="budget-input" placeholder="0,00" style="text-align:right"></td>
   </tr>`).join("");
   const totalBudget = Object.values(etat.budgets).reduce((s,v)=>s+(parseFloat(v)||0),0);
   return `
@@ -1069,6 +1082,7 @@ function brancherEvenementsVue(){
   // --- Vue transactions ---
   if(vueCourante==="transactions"){
     q("#btnAddTx",b=>b.onclick=ajouterTransaction);
+    ["#txDate","#txLib","#txMontant"].forEach(s=>onEnter(s, ajouterTransaction));
     q("#btnViderTx",b=>b.onclick=()=>{ if(confirm("Supprimer TOUTES les transactions ?")){etat.transactions=[];sauver();render();toast("Transactions supprimées");}});
     document.querySelectorAll(".cat-select").forEach(s=>s.onchange=()=>{
       const t=etat.transactions.find(x=>x.id===s.dataset.id); if(t){t.categorie=s.value;sauver();}
@@ -1094,6 +1108,7 @@ function brancherEvenementsVue(){
       etat.categories.push({nom,type:val("#catType"),couleur:"#"+Math.floor(Math.random()*0xffffff).toString(16).padStart(6,"0")});
       sauver();render();toast("Catégorie ajoutée");
     });
+    onEnter("#catNom", ()=>q("#btnAddCat",b=>b.click()));
     document.querySelectorAll(".col-cat").forEach(inp=>inp.onchange=()=>{etat.categories[+inp.dataset.cat].couleur=inp.value;sauver();render();});
     document.querySelectorAll(".btn-suppr-cat").forEach(b=>b.onclick=()=>{
       const i=+b.dataset.i; if(confirm(`Supprimer la catégorie "${etat.categories[i].nom}" ?`)){etat.categories.splice(i,1);sauver();render();}
@@ -1102,6 +1117,7 @@ function brancherEvenementsVue(){
       const mot=val("#regMot").trim(); if(!mot)return toast("Mot-clé requis");
       etat.regles.push({motcle:mot,categorie:val("#regCat")});sauver();render();toast("Règle ajoutée");
     });
+    onEnter("#regMot", ()=>q("#btnAddRegle",b=>b.click()));
     document.querySelectorAll(".reg-input").forEach(inp=>inp.onchange=()=>{
       etat.regles[+inp.dataset.regle][inp.dataset.champ]=inp.value;sauver();
     });
@@ -1156,9 +1172,9 @@ async function traiterFichiers(files){
         <div class="kpi depenses"><div class="kpi-label">Doublons ignorés</div><div class="kpi-value">${doublons}</div></div>
         <div class="kpi frais"><div class="kpi-label">Fichiers</div><div class="kpi-value">${files.length}</div></div>
       </div>
-      ${erreursGlobales.length?`<div class="hint neg">⚠️ ${erreursGlobales.join("<br>")}</div>`:""}
+      ${erreursGlobales.length?`<div class="hint neg">⚠️ ${erreursGlobales.map(esc).join("<br>")}</div>`:""}
       ${apercu.length?`<div class="scroll-x"><table class="wide"><thead><tr><th>Date</th><th>Libellé</th><th>Catégorie auto</th><th class="num">Montant</th></tr></thead><tbody>
-        ${apercu.map(t=>`<tr><td>${t.date}</td><td>${t.libelle}</td><td><span class="badge">${t.categorie}</span></td><td class="num ${t.montant>=0?'pos':'neg'}">${fmt(t.montant)}</td></tr>`).join("")}
+        ${apercu.map(t=>`<tr><td>${esc(t.date)}</td><td>${esc(t.libelle)}</td><td><span class="badge">${esc(t.categorie)}</span></td><td class="num ${t.montant>=0?'pos':'neg'}">${fmt(t.montant)}</td></tr>`).join("")}
       </tbody></table></div><p class="hint">Ajustez les catégories dans l'onglet « Transactions ».</p>`:""}
     `;
   }
@@ -1170,6 +1186,11 @@ async function traiterFichiers(files){
    ============================================================ */
 function q(sel,cb){ const el=document.querySelector(sel); if(el&&cb)cb(el); return el; }
 function val(sel){ const el=document.querySelector(sel); return el?el.value:""; }
+/* Valide un champ à la touche Entrée (confort de saisie clavier) */
+function onEnter(sel, fn){
+  const el=document.querySelector(sel);
+  if(el) el.addEventListener("keydown", e=>{ if(e.key==="Enter"){ e.preventDefault(); fn(); } });
+}
 function toast(msg){
   const t=document.getElementById("toast"); t.textContent=msg; t.classList.add("show");
   clearTimeout(toast._t); toast._t=setTimeout(()=>t.classList.remove("show"),2600);
