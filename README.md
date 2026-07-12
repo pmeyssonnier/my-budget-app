@@ -4,6 +4,10 @@ Application web autonome de **suivi de budget mensuel et annuel**, inspirée des
 
 Un seul fichier HTML, aucune installation, aucun serveur. Il suffit de l'ouvrir dans un navigateur.
 
+**➡️ Démo en ligne : https://pmeyssonnier.github.io/my-budget-app/**
+
+> L'application reste 100% côté navigateur, même hébergée sur GitHub Pages : aucune donnée n'est envoyée au serveur.
+
 ## Fonctionnalités
 
 - **Récapitulatif annuel** : revenus, dépenses, frais fixes, crédits, épargne, reste à vivre, répartition en donut, évolution mensuelle, top des dépenses par catégorie.
