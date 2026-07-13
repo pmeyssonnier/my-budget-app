@@ -1273,15 +1273,22 @@ let importEnAttente = null;
 async function traiterFichiers(files){
   if(!files||!files.length)return;
   const aAjouter=[], erreursGlobales=[]; let doublons=0;
-  const cles=new Set(etat.transactions.map(cleTx));  // dédoublonne vs l'existant ET au sein du lot
+  // Dédoublonnage par COMPTAGE : on n'écarte une opération que si elle est déjà
+  // présente dans l'existant (cas du ré-import du même relevé). Deux opérations
+  // réellement identiques au sein d'un même relevé (ex. deux achats de 150 € le
+  // même jour) sont TOUTES conservées — les compter comme doublons perdait des
+  // transactions légitimes.
+  const restantExistant=new Map();
+  etat.transactions.forEach(t=>{ const k=cleTx(t); restantExistant.set(k,(restantExistant.get(k)||0)+1); });
   for(const f of files){
     try{
       const res=await lireFichier(f);
       if(res.erreurs.length){ erreursGlobales.push(`${f.name} : ${res.erreurs.join(" ")}`); continue; }
       res.ok.forEach(t=>{
         const cle=cleTx(t);
-        if(cles.has(cle)){doublons++;return;}
-        cles.add(cle); aAjouter.push(t);
+        const reste=restantExistant.get(cle)||0;
+        if(reste>0){ restantExistant.set(cle,reste-1); doublons++; return; }  // déjà présent
+        aAjouter.push(t);
       });
     }catch(err){ erreursGlobales.push(`${f.name} : lecture impossible (${err.message||err})`); }
   }
