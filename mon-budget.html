@@ -296,12 +296,22 @@ const CATS_DEFAUT = [
   {nom:"Crédit conso",       type:"credit",  couleur:"#8a6bb5"},
   {nom:"Épargne",            type:"epargne", couleur:"#5b8fc7"},
   {nom:"Investissements",    type:"epargne", couleur:"#4d7fb8"},
+  {nom:"Virements internes", type:"depense", couleur:"#7d8ba0"},
   {nom:"Non classé",         type:"depense", couleur:"#6b7684"},
 ];
 
 /* Règles de catégorisation automatique : si le libellé contient le mot-clé
-   (insensible à la casse/accents), on assigne la catégorie. Éditable dans l'onglet. */
+   (insensible à la casse/accents), on assigne la catégorie. Première règle qui
+   matche = gagnante, donc les règles les plus spécifiques (IBAN) sont en tête.
+   Éditable dans l'onglet. */
 const REGLES_DEFAUT = [
+  // Virements internes : IBAN de mes propres comptes. En premier car un IBAN exact
+  // prime sur un mot-clé fuzzy (ex. « CHARGES COMMUNES » ne doit pas l'emporter),
+  // et le nom du titulaire figurant sur chaque paiement carte rendrait un repérage
+  // par nom inutilisable.
+  {motcle:"BE08 0657 8497 4513", categorie:"Virements internes"},
+  {motcle:"BE81 6511 3459 9024", categorie:"Virements internes"},
+  {motcle:"BE67 0639 3621 0487", categorie:"Virements internes"},
   {motcle:"engie",         categorie:"Gaz"},
   {motcle:"luminus",       categorie:"Électricité"},
   {motcle:"electrabel",    categorie:"Électricité"},
@@ -345,6 +355,10 @@ const REGLES_DEFAUT = [
   {motcle:"virement epargne",categorie:"Épargne"},
 ];
 
+/* IBAN de mes propres comptes → « Virements internes » (repérage fiable par IBAN).
+   Déclaré AVANT chargerEtat() car migrerEtat() l'utilise dès le chargement. */
+const IBAN_INTERNES = ["BE08 0657 8497 4513","BE81 6511 3459 9024","BE67 0639 3621 0487"];
+
 /* État global de l'application (chargé depuis localStorage ou défaut) */
 let etat = chargerEtat();
 
@@ -365,8 +379,32 @@ function chargerEtat(){
     if(!s) return etatDefaut();
     const e = JSON.parse(s);
     // garde-fous : compléter les champs manquants
-    return Object.assign(etatDefaut(), e);
+    return migrerEtat(Object.assign(etatDefaut(), e));
   }catch(err){ console.warn("Chargement échoué, état par défaut",err); return etatDefaut(); }
+}
+/* Migrations appliquées à un état chargé depuis une version antérieure.
+   Idempotent : chaque migration ne s'exécute que si son résultat est absent. */
+function migrerEtat(e){
+  // Virements internes : catégorie + règles IBAN. On reclasse UNIQUEMENT les
+  // transactions encore « Non classé » (pour ne jamais écraser un choix manuel).
+  if(!e.categories.some(c=>c.nom==="Virements internes")){
+    const iNC = e.categories.findIndex(c=>c.nom==="Non classé");   // insérer avant « Non classé »
+    const cat = {nom:"Virements internes", type:"depense", couleur:"#7d8ba0"};
+    if(iNC>=0) e.categories.splice(iNC,0,cat); else e.categories.push(cat);
+  }
+  IBAN_INTERNES.forEach(iban=>{
+    if(!e.regles.some(r=>norm(r.motcle)===norm(iban))){
+      e.regles.unshift({motcle:iban, categorie:"Virements internes"});  // prioritaire : IBAN > mot-clé
+      // Un IBAN exact fait autorité : on reclasse toutes les transactions concernées
+      // (corrige aussi d'anciens faux positifs de mots-clés, ex. « CHARGES COMMUNES »).
+      if(Array.isArray(e.transactions)){
+        e.transactions.forEach(t=>{
+          if(t && norm(t.libelle).includes(norm(iban))) t.categorie="Virements internes";
+        });
+      }
+    }
+  });
+  return e;
 }
 function sauver(){
   try{ localStorage.setItem(STORAGE_KEY, JSON.stringify(etat)); }
