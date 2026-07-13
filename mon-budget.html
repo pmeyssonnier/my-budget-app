@@ -806,6 +806,9 @@ function dessinerAire(canvas, series, labels){
    ============================================================ */
 let vueCourante="annuel";
 let moisCourant=new Date().getMonth();
+/* Filtres de la vue Transactions (persistés entre les rendus) */
+let txRecherche="";   // texte de recherche libre
+let txFiltreCat="";   // "" = toutes les catégories
 
 function render(){
   document.getElementById("deviseInput").value = etat.devise;
@@ -964,10 +967,21 @@ function vueTransactions(){
 
   <div class="section">
     <div class="flex-between" style="margin-bottom:12px">
-      <div class="section-title" style="margin:0"><span class="dot"></span>Liste (${tx.length})</div>
+      <div class="section-title" style="margin:0"><span class="dot"></span>Liste (<span id="txCount">${tx.length}</span>)</div>
       <button class="btn btn-sm btn-danger" id="btnViderTx">Tout supprimer</button>
     </div>
-    ${tx.length? `<div class="scroll-x"><table class="wide"><thead><tr><th>Date</th><th>Libellé</th><th>Catégorie</th><th class="num">Montant</th><th>Source</th><th></th></tr></thead><tbody>${lignes}</tbody></table></div>`
+    ${tx.length? `
+    <div class="form-row" style="margin-bottom:14px">
+      <label class="field" style="grid-column:span 2"><span>Rechercher</span><input type="text" id="txSearch" placeholder="Libellé, date, montant, source…" value="${esc(txRecherche)}"></label>
+      <label class="field"><span>Filtrer par catégorie</span><select id="txFiltreCat">
+        <option value="">Toutes les catégories</option>
+        ${etat.categories.map(c=>`<option value="${esc(c.nom)}" ${c.nom===txFiltreCat?'selected':''}>${esc(c.nom)}</option>`).join("")}
+      </select></label>
+      <label class="field"><span>&nbsp;</span><button class="btn" id="btnResetFiltre" style="width:100%">✕ Réinitialiser</button></label>
+    </div>
+    <div class="scroll-x"><table class="wide"><thead><tr><th>Date</th><th>Libellé</th><th>Catégorie</th><th class="num">Montant</th><th>Source</th><th></th></tr></thead><tbody id="txBody">${lignes}
+      <tr id="txNoResults" style="display:none"><td colspan="6" class="empty">Aucune transaction ne correspond aux filtres.</td></tr>
+    </tbody></table></div>`
     : '<div class="empty">Aucune transaction. Importez un relevé ou ajoutez-en une.</div>'}
   </div>`;
 }
@@ -1085,11 +1099,16 @@ function brancherEvenementsVue(){
     ["#txDate","#txLib","#txMontant"].forEach(s=>onEnter(s, ajouterTransaction));
     q("#btnViderTx",b=>b.onclick=()=>{ if(confirm("Supprimer TOUTES les transactions ?")){etat.transactions=[];sauver();render();toast("Transactions supprimées");}});
     document.querySelectorAll(".cat-select").forEach(s=>s.onchange=()=>{
-      const t=etat.transactions.find(x=>x.id===s.dataset.id); if(t){t.categorie=s.value;sauver();}
+      const t=etat.transactions.find(x=>x.id===s.dataset.id); if(t){t.categorie=s.value;sauver();appliquerFiltreTx();}
     });
     document.querySelectorAll(".btn-suppr").forEach(b=>b.onclick=()=>{
       etat.transactions=etat.transactions.filter(x=>x.id!==b.dataset.id);sauver();render();
     });
+    // --- Recherche & filtre par catégorie (filtrage DOM, préserve le focus) ---
+    q("#txSearch",el=>el.oninput=()=>{ txRecherche=el.value; appliquerFiltreTx(); });
+    q("#txFiltreCat",el=>el.onchange=()=>{ txFiltreCat=el.value; appliquerFiltreTx(); });
+    q("#btnResetFiltre",b=>b.onclick=()=>{ txRecherche=""; txFiltreCat=""; render(); });
+    appliquerFiltreTx();  // applique les filtres persistés au rendu initial
   }
   // --- Vue import ---
   if(vueCourante==="import"){
@@ -1133,6 +1152,31 @@ function brancherEvenementsVue(){
       const v=parseMontant(inp.value); etat.budgets[inp.dataset.budget]= isNaN(v)?0:Math.abs(v); sauver();render();
     });
   }
+}
+
+/* ---------- Filtrage de la liste des transactions ----------
+   Filtre les lignes déjà rendues (affichage/masquage) plutôt que de
+   re-générer le tableau : le focus du champ de recherche est préservé
+   et c'est instantané. La recherche est insensible à la casse/accents et
+   porte sur date, libellé, catégorie, montant et source. */
+function appliquerFiltreTx(){
+  const corps = document.getElementById("txBody");
+  if(!corps) return;
+  const req = norm(txRecherche);
+  const cat = txFiltreCat;
+  let visibles = 0;
+  corps.querySelectorAll("tr[data-id]").forEach(tr=>{
+    const t = etat.transactions.find(x=>x.id===tr.dataset.id);
+    if(!t){ tr.style.display="none"; return; }
+    const okCat = !cat || t.categorie===cat;
+    const foin = norm([t.date, t.libelle, t.categorie, t.source, t.montant, fmt(Math.abs(t.montant))].join(" "));
+    const okReq = !req || foin.includes(req);
+    const montrer = okCat && okReq;
+    tr.style.display = montrer ? "" : "none";
+    if(montrer) visibles++;
+  });
+  const cnt = document.getElementById("txCount"); if(cnt) cnt.textContent = visibles;
+  const vide = document.getElementById("txNoResults"); if(vide) vide.style.display = visibles ? "none" : "";
 }
 
 /* ---------- Actions transactions ---------- */
