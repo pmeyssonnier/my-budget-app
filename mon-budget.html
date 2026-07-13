@@ -968,7 +968,10 @@ function vueTransactions(){
   <div class="section">
     <div class="flex-between" style="margin-bottom:12px">
       <div class="section-title" style="margin:0"><span class="dot"></span>Liste (<span id="txCount">${tx.length}</span>)</div>
-      <button class="btn btn-sm btn-danger" id="btnViderTx">Tout supprimer</button>
+      <div class="mini-actions">
+        ${tx.length?`<button class="btn btn-sm" id="btnExportCsv" title="Exporter les transactions filtrées en CSV">⬇ Exporter CSV</button>`:''}
+        <button class="btn btn-sm btn-danger" id="btnViderTx">Tout supprimer</button>
+      </div>
     </div>
     ${tx.length? `
     <div class="form-row" style="margin-bottom:14px">
@@ -1108,6 +1111,7 @@ function brancherEvenementsVue(){
     q("#txSearch",el=>el.oninput=()=>{ txRecherche=el.value; appliquerFiltreTx(); });
     q("#txFiltreCat",el=>el.onchange=()=>{ txFiltreCat=el.value; appliquerFiltreTx(); });
     q("#btnResetFiltre",b=>b.onclick=()=>{ txRecherche=""; txFiltreCat=""; render(); });
+    q("#btnExportCsv",b=>b.onclick=exporterCsvTx);
     appliquerFiltreTx();  // applique les filtres persistés au rendu initial
   }
   // --- Vue import ---
@@ -1159,24 +1163,61 @@ function brancherEvenementsVue(){
    re-générer le tableau : le focus du champ de recherche est préservé
    et c'est instantané. La recherche est insensible à la casse/accents et
    porte sur date, libellé, catégorie, montant et source. */
+
+/* Prédicat unique partagé par le filtre DOM et l'export CSV, pour que les
+   deux restent toujours cohérents (mêmes critères : recherche + catégorie). */
+function txCorrespond(t){
+  if(!t) return false;
+  if(txFiltreCat && t.categorie!==txFiltreCat) return false;
+  const req = norm(txRecherche);
+  if(!req) return true;
+  const foin = norm([t.date, t.libelle, t.categorie, t.source, t.montant, fmt(Math.abs(t.montant))].join(" "));
+  return foin.includes(req);
+}
+
 function appliquerFiltreTx(){
   const corps = document.getElementById("txBody");
   if(!corps) return;
-  const req = norm(txRecherche);
-  const cat = txFiltreCat;
   let visibles = 0;
   corps.querySelectorAll("tr[data-id]").forEach(tr=>{
     const t = etat.transactions.find(x=>x.id===tr.dataset.id);
-    if(!t){ tr.style.display="none"; return; }
-    const okCat = !cat || t.categorie===cat;
-    const foin = norm([t.date, t.libelle, t.categorie, t.source, t.montant, fmt(Math.abs(t.montant))].join(" "));
-    const okReq = !req || foin.includes(req);
-    const montrer = okCat && okReq;
+    const montrer = txCorrespond(t);
     tr.style.display = montrer ? "" : "none";
     if(montrer) visibles++;
   });
   const cnt = document.getElementById("txCount"); if(cnt) cnt.textContent = visibles;
   const vide = document.getElementById("txNoResults"); if(vide) vide.style.display = visibles ? "none" : "";
+}
+
+/* ---------- Export CSV des transactions filtrées ----------
+   Sépare par ";" et décimales à la virgule (convention FR/BE, Excel).
+   Ajoute un BOM UTF-8 pour que les accents s'ouvrent correctement dans Excel.
+   Le fichier reste ré-importable par l'app (parseMontant gère la virgule). */
+function csvChamp(v){
+  const s = (v==null?"":String(v));
+  return /[";\n\r]/.test(s) ? '"'+s.replace(/"/g,'""')+'"' : s;
+}
+function montantCsv(n){
+  // "-42,50" : deux décimales, virgule décimale, sans séparateur de milliers
+  return (Math.round((n+Number.EPSILON)*100)/100).toFixed(2).replace(".",",");
+}
+function exporterCsvTx(){
+  const tx = [...etat.transactions]
+    .sort((a,b)=>(b.date||"").localeCompare(a.date||""))
+    .filter(txCorrespond);
+  if(!tx.length){ toast("Aucune transaction à exporter (filtres trop restrictifs ?)"); return; }
+  const entetes = ["Date","Libellé","Catégorie","Type","Montant","Source"];
+  const lignes = tx.map(t=>[
+    t.date||"", t.libelle||"", t.categorie||"", typeCat(t.categorie),
+    montantCsv(t.montant), t.source||""
+  ].map(csvChamp).join(";"));
+  const contenu = "﻿" + [entetes.map(csvChamp).join(";"), ...lignes].join("\r\n");
+  const blob = new Blob([contenu], {type:"text/csv;charset=utf-8"});
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = `transactions-${new Date().toISOString().slice(0,10)}.csv`;
+  a.click(); URL.revokeObjectURL(a.href);
+  toast(`${tx.length} transaction(s) exportée(s) en CSV`);
 }
 
 /* ---------- Actions transactions ---------- */
