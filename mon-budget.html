@@ -407,11 +407,19 @@ function txMois(m){ // m = index 0..11
   return etat.transactions.filter(t=>t.date && t.date.slice(0,4)==String(etat.annee) && t.date.slice(5,7)==mm);
 }
 
-/* Somme signée par type sur un ensemble de transactions.
-   Revenus/épargne comptés en valeur absolue positive ; dépenses/frais/crédits en absolu. */
+/* Contribution SIGNÉE d'une transaction au total de son type.
+   Convention de flux de trésorerie : montant > 0 = entrée, montant < 0 = sortie.
+   - revenu : on additionne le montant tel quel (une entrée positive augmente les revenus) ;
+   - dépense/frais/crédit/épargne : ce sont des sorties, dont l'« ampleur » vaut -montant
+     (une sortie de -42 € compte +42 € de dépense ; un remboursement de +45 € la réduit de 45 €).
+   Ainsi les remboursements et retraits d'épargne se compensent correctement au lieu de
+   gonfler artificiellement les totaux (l'ancien Math.abs ignorait le signe). */
+function valeurType(t){
+  return typeCat(t.categorie)==="revenu" ? t.montant : -t.montant;
+}
 function totauxParType(list){
   const r={revenu:0,depense:0,frais:0,credit:0,epargne:0};
-  list.forEach(t=>{ const ty=typeCat(t.categorie); r[ty]=(r[ty]||0)+Math.abs(t.montant); });
+  list.forEach(t=>{ const ty=typeCat(t.categorie); r[ty]=(r[ty]||0)+valeurType(t); });
   return r;
 }
 /* Reste à vivre = revenus - (dépenses + frais + crédits + épargne) */
@@ -552,6 +560,7 @@ async function pdfEnLignes(arrayBuffer){
   if(!window.pdfjsLib) throw new Error("Bibliothèque PDF non chargée (vérifiez votre connexion au premier lancement).");
   const pdf = await pdfjsLib.getDocument({data:arrayBuffer}).promise;
   const lignes = [];
+  const lignesInfo = [];   // parallèle à `lignes` : jetons {x,s} triés par X (détection de colonnes)
   const pages = [];
   for(let p=1;p<=pdf.numPages;p++){
     const page = await pdf.getPage(p);
@@ -570,12 +579,35 @@ async function pdfEnLignes(arrayBuffer){
     Object.keys(parY)
       .sort((a,b)=>b-a)  // Y décroissant = haut vers bas
       .forEach(y=>{
-        const txt = parY[y].sort((a,b)=>a.x-b.x).map(o=>o.s).join(" ").replace(/\s+/g," ").trim();
-        if(txt){ lignes.push(txt); lignesPage.push(txt); }
+        const toks = parY[y].sort((a,b)=>a.x-b.x);
+        const txt = toks.map(o=>o.s).join(" ").replace(/\s+/g," ").trim();
+        if(txt){ lignes.push(txt); lignesPage.push(txt); lignesInfo.push(toks); }
       });
     pages.push(lignesPage);
   }
-  return {lignes, pages};
+  return {lignes, pages, lignesInfo};
+}
+
+/* Un jeton qui EST, à lui seul, un montant (pour la détection par colonne). */
+const RE_MONTANT_SEUL = /^[-+]?\d{1,3}(?:[.\s]\d{3})*[.,]\d{2}-?$|^\d+[.,]\d{2}-?$/;
+
+/* Choisit, sur une ligne PDF, le montant de l'OPÉRATION (et non le solde courant).
+   - Si les positions X sont disponibles et que les jetons-montants s'alignent
+     exactement avec les montants extraits de la chaîne : le solde est la colonne
+     la plus à DROITE (X max) ; on prend l'avant-dernière colonne de montant.
+   - Sinon (montants collés/scindés en plusieurs jetons) : repli sur l'avant-dernier
+     montant de la ligne dès qu'il y en a au moins deux, car un relevé se lit en
+     général « date … montant solde ». Un seul montant → on le prend.
+   Limite connue : lignes à deux montants sans colonne solde (ex. conversion de
+   devise) — cas minoritaire où l'avant-dernier n'est pas le bon. */
+function montantOperationPdf(montants, tokens){
+  if(tokens && tokens.length){
+    const cols = tokens.filter(t=>RE_MONTANT_SEUL.test((t.s||"").trim())).sort((a,b)=>a.x-b.x);
+    if(cols.length>=2 && cols.length===montants.length){
+      return cols[cols.length-2].s.trim();   // avant-dernière colonne = opération, dernière = solde
+    }
+  }
+  return montants.length>=2 ? montants[montants.length-2] : montants[montants.length-1];
 }
 
 /* Convertit un montant "texte PDF" (avec éventuel signe suffixe) en nombre signé. */
@@ -646,11 +678,15 @@ function parserBelfius(pages, source){
 
 /* Transforme les lignes d'un PDF en transactions.
    Heuristique générique (fallback) : on ne garde que les lignes contenant une date ET un montant. */
-function lignesPdfVersTransactions(lignes, source){
+function lignesPdfVersTransactions(lignes, source, lignesInfo){
   const ok=[], erreurs=[];
-  // Mots indiquant une ligne de solde / total / en-tête → à ignorer, pas une opération
-  const RE_IGNORER = /\b(solde|saldo|balance|total|report|nouveau solde|ancien solde|solde initial|solde final|solde précédent|à reporter|page\b)/i;
-  for(const ligne of lignes){
+  // Mots indiquant une ligne de solde / en-tête → à ignorer, pas une opération.
+  // Frontières de mots (\b…\b) pour ne PAS matcher en sous-chaîne. « total » est
+  // volontairement absent : c'est le nom d'une enseigne (TotalEnergies, station Total)
+  // que les règles catégorisent en carburant — l'inclure supprimait de vraies opérations.
+  const RE_IGNORER = /\b(solde|saldo|balance|nouveau solde|ancien solde|solde initial|solde final|solde précédent|à reporter|report|page)\b/i;
+  for(let i=0;i<lignes.length;i++){
+    const ligne = lignes[i];
     if(RE_IGNORER.test(ligne)) continue;         // on saute soldes/totaux/pieds de page
     const mDate = ligne.match(RE_DATE);
     if(!mDate) continue;                          // une opération DOIT porter sa propre date
@@ -658,10 +694,9 @@ function lignesPdfVersTransactions(lignes, source){
     if(!date) continue;
     const montants = ligne.match(RE_MONTANT);
     if(!montants) continue;
-    // On prend le DERNIER montant de la ligne comme mouvement (souvent le solde est ailleurs,
-    // mais sur la plupart des extraits le montant de l'opération est le dernier chiffre décimal).
-    // Si deux montants et le dernier ressemble à un solde très grand, on garde l'avant-dernier.
-    let montantStr = montants[montants.length-1];
+    // Choix du montant de l'opération (et non du solde) : par colonne X si possible,
+    // sinon repli sur l'avant-dernier montant. Voir montantOperationPdf().
+    let montantStr = montantOperationPdf(montants, lignesInfo && lignesInfo[i]);
     let montant = montantPdf(montantStr);
     if(isNaN(montant) || montant===0) continue;
     // Libellé = ligne nettoyée de la date et des montants
@@ -689,10 +724,10 @@ function lireFichier(file){
     if(nom.endsWith(".pdf")){
       reader.onload = async e=>{
         try{
-          const {lignes, pages} = await pdfEnLignes(e.target.result);
+          const {lignes, pages, lignesInfo} = await pdfEnLignes(e.target.result);
           // Choix du parseur selon le format détecté
           if(estBelfius(pages)) resolve(parserBelfius(pages, "Belfius"));
-          else resolve(lignesPdfVersTransactions(lignes, file.name));
+          else resolve(lignesPdfVersTransactions(lignes, file.name, lignesInfo));
         }catch(err){ reject(err); }
       };
       reader.onerror = reject;
@@ -717,11 +752,6 @@ function lireFichier(file){
       reader.readAsText(file,"utf-8");
     }
   });
-}
-/* Détection de doublons : même date + même montant + même libellé normalisé */
-function estDoublon(t){
-  return etat.transactions.some(x=>
-    x.date===t.date && Math.abs(x.montant-t.montant)<0.005 && norm(x.libelle)===norm(t.libelle));
 }
 
 /* ============================================================
@@ -839,8 +869,8 @@ function vueAnnuel(){
   ].filter(s=>s.valeur>0);
   // top catégories dépenses/frais
   const parCat={};
-  tx.forEach(t=>{ const ty=typeCat(t.categorie); if(ty==="depense"||ty==="frais"||ty==="credit"){ parCat[t.categorie]=(parCat[t.categorie]||0)+Math.abs(t.montant); }});
-  const top=Object.entries(parCat).sort((a,b)=>b[1]-a[1]).slice(0,12);
+  tx.forEach(t=>{ const ty=typeCat(t.categorie); if(ty==="depense"||ty==="frais"||ty==="credit"){ parCat[t.categorie]=(parCat[t.categorie]||0)+valeurType(t); }});
+  const top=Object.entries(parCat).filter(([c,v])=>v>0).sort((a,b)=>b[1]-a[1]).slice(0,12);
   const maxTop=top.length?top[0][1]:1;
 
   return `
@@ -884,7 +914,7 @@ function vueAnnuel(){
         <td class="muted">${i+1}</td>
         <td><span class="legend-dot" style="display:inline-block;background:${esc(couleurCat(c))};margin-right:8px"></span>${esc(c)}</td>
         <td class="num">${fmt(v)}</td>
-        <td><div class="cat-bar"><span style="width:${(v/maxTop*100).toFixed(1)}%;background:${esc(couleurCat(c))}"></span></div></td>
+        <td><div class="cat-bar"><span style="width:${Math.max(0,Math.min(100,v/maxTop*100)).toFixed(1)}%;background:${esc(couleurCat(c))}"></span></div></td>
       </tr>`).join("")}
     </tbody></table>`
     : '<div class="empty">Importez vos relevés ou ajoutez des transactions pour voir le récapitulatif.</div>'}
@@ -899,7 +929,7 @@ function vueMensuelle(){
   const boutonsMois=MOIS.map((m,i)=>`<button class="month-btn ${i===moisCourant?'active':''}" data-mois="${i}">${m.slice(0,3)}</button>`).join("");
   // résumé par catégorie avec budget prévu
   const parCat={};
-  tx.forEach(t=>{ parCat[t.categorie]=(parCat[t.categorie]||0)+Math.abs(t.montant); });
+  tx.forEach(t=>{ parCat[t.categorie]=(parCat[t.categorie]||0)+valeurType(t); });
   const lignes=Object.entries(parCat).sort((a,b)=>b[1]-a[1]).map(([c,reel])=>{
     const prevu=etat.budgets[c]||0;
     const prog= prevu>0 ? (reel/prevu*100) : null;
@@ -938,16 +968,18 @@ function vueTransactions(){
   const opts = etat.categories.map(c=>`<option value="${esc(c.nom)}">${esc(c.nom)}</option>`).join("");
   const tx=[...etat.transactions].sort((a,b)=> (b.date||"").localeCompare(a.date||""));
   const lignes = tx.map(t=>{
-    const ty=typeCat(t.categorie);
-    const signe = (ty==="revenu") ? '+' : '−';
-    const cls = (ty==="revenu")?'pos':'neg';
+    // Le signe affiché reflète le sens réel du flux (montant signé), pas le
+    // type de catégorie — cohérent avec l'aperçu d'import.
+    const positif = t.montant >= 0;
+    const signe = positif ? '+' : '−';
+    const cls = positif ? 'pos' : 'neg';
     return `<tr data-id="${esc(t.id)}">
       <td style="white-space:nowrap">${esc(t.date||'')}</td>
       <td>${esc(t.libelle||'')}</td>
       <td><select class="cat-select" data-id="${esc(t.id)}">${etat.categories.map(c=>`<option value="${esc(c.nom)}" ${c.nom===t.categorie?'selected':''}>${esc(c.nom)}</option>`).join("")}</select></td>
       <td class="num ${cls}" style="white-space:nowrap">${signe} ${fmt(Math.abs(t.montant)).replace(' '+dev(),'')} ${esc(dev())}</td>
       <td class="muted" style="font-size:.72rem">${esc(t.source||'')}</td>
-      <td><button class="icon-btn btn-suppr" data-id="${t.id}" title="Supprimer">🗑</button></td>
+      <td><button class="icon-btn btn-suppr" data-id="${esc(t.id)}" title="Supprimer">🗑</button></td>
     </tr>`;
   }).join("");
 
@@ -1231,39 +1263,84 @@ function ajouterTransaction(){
 }
 
 /* ---------- Traitement fichiers importés ---------- */
+/* Clé de dédoublonnage : même date + même montant (au centime) + même libellé normalisé. */
+function cleTx(t){ return t.date+"|"+(Math.round((t.montant||0)*100)/100)+"|"+norm(t.libelle); }
+
+/* Import de fichiers en DEUX temps : on analyse et on prépare un aperçu, mais
+   RIEN n'est enregistré tant que l'utilisateur n'a pas cliqué « Confirmer ».
+   Cela évite d'insérer 300 soldes (PDF mal reconnu) sans possibilité d'annuler. */
+let importEnAttente = null;
 async function traiterFichiers(files){
   if(!files||!files.length)return;
-  let ajout=0,doublons=0,erreursGlobales=[];
-  const apercu=[];
+  const aAjouter=[], erreursGlobales=[]; let doublons=0;
+  // Dédoublonnage par COMPTAGE : on n'écarte une opération que si elle est déjà
+  // présente dans l'existant (cas du ré-import du même relevé). Deux opérations
+  // réellement identiques au sein d'un même relevé (ex. deux achats de 150 € le
+  // même jour) sont TOUTES conservées — les compter comme doublons perdait des
+  // transactions légitimes.
+  const restantExistant=new Map();
+  etat.transactions.forEach(t=>{ const k=cleTx(t); restantExistant.set(k,(restantExistant.get(k)||0)+1); });
   for(const f of files){
     try{
       const res=await lireFichier(f);
       if(res.erreurs.length){ erreursGlobales.push(`${f.name} : ${res.erreurs.join(" ")}`); continue; }
       res.ok.forEach(t=>{
-        if(estDoublon(t)){doublons++;return;}
-        etat.transactions.push(t);ajout++;
-        if(apercu.length<8)apercu.push(t);
+        const cle=cleTx(t);
+        const reste=restantExistant.get(cle)||0;
+        if(reste>0){ restantExistant.set(cle,reste-1); doublons++; return; }  // déjà présent
+        aAjouter.push(t);
       });
     }catch(err){ erreursGlobales.push(`${f.name} : lecture impossible (${err.message||err})`); }
   }
-  sauver();
-  // afficher aperçu
+  importEnAttente={aAjouter, doublons, erreursGlobales, nbFichiers:files.length};
+  afficherApercuImport();
+}
+
+function afficherApercuImport(){
   const zone=document.getElementById("apercuImport"), contenu=document.getElementById("apercuContenu");
-  if(zone&&contenu){
-    zone.style.display="block";
-    contenu.innerHTML=`
-      <div class="kpi-grid" style="margin-bottom:14px">
-        <div class="kpi revenus"><div class="kpi-label">Ajoutées</div><div class="kpi-value pos">${ajout}</div></div>
-        <div class="kpi depenses"><div class="kpi-label">Doublons ignorés</div><div class="kpi-value">${doublons}</div></div>
-        <div class="kpi frais"><div class="kpi-label">Fichiers</div><div class="kpi-value">${files.length}</div></div>
+  if(!zone||!contenu||!importEnAttente) return;
+  const {aAjouter, doublons, erreursGlobales, nbFichiers}=importEnAttente;
+  const MAX=50, affichees=aAjouter.slice(0,MAX);
+  zone.style.display="block";
+  contenu.innerHTML=`
+    <div class="kpi-grid" style="margin-bottom:14px">
+      <div class="kpi revenus"><div class="kpi-label">À ajouter</div><div class="kpi-value pos">${aAjouter.length}</div></div>
+      <div class="kpi depenses"><div class="kpi-label">Doublons ignorés</div><div class="kpi-value">${doublons}</div></div>
+      <div class="kpi frais"><div class="kpi-label">Fichiers</div><div class="kpi-value">${nbFichiers}</div></div>
+    </div>
+    ${erreursGlobales.length?`<div class="hint neg">⚠️ ${erreursGlobales.map(esc).join("<br>")}</div>`:""}
+    ${aAjouter.length?`
+      <div class="flex-between" style="margin-bottom:12px">
+        <span class="muted">Vérifiez avant de confirmer — rien n'est enregistré tant que vous n'avez pas cliqué « Confirmer ».</span>
+        <div class="mini-actions">
+          <button class="btn btn-primary btn-sm" id="btnConfirmerImport">✔ Confirmer l'import (${aAjouter.length})</button>
+          <button class="btn btn-sm" id="btnAnnulerImport">Annuler</button>
+        </div>
       </div>
-      ${erreursGlobales.length?`<div class="hint neg">⚠️ ${erreursGlobales.map(esc).join("<br>")}</div>`:""}
-      ${apercu.length?`<div class="scroll-x"><table class="wide"><thead><tr><th>Date</th><th>Libellé</th><th>Catégorie auto</th><th class="num">Montant</th></tr></thead><tbody>
-        ${apercu.map(t=>`<tr><td>${esc(t.date)}</td><td>${esc(t.libelle)}</td><td><span class="badge">${esc(t.categorie)}</span></td><td class="num ${t.montant>=0?'pos':'neg'}">${fmt(t.montant)}</td></tr>`).join("")}
-      </tbody></table></div><p class="hint">Ajustez les catégories dans l'onglet « Transactions ».</p>`:""}
-    `;
-  }
-  toast(`${ajout} transaction(s) importée(s), ${doublons} doublon(s) ignoré(s)`);
+      <div class="scroll-x"><table class="wide"><thead><tr><th>Date</th><th>Libellé</th><th>Catégorie auto</th><th class="num">Montant</th></tr></thead><tbody>
+        ${affichees.map(t=>`<tr><td>${esc(t.date)}</td><td>${esc(t.libelle)}</td><td><span class="badge">${esc(t.categorie)}</span></td><td class="num ${t.montant>=0?'pos':'neg'}">${fmt(t.montant)}</td></tr>`).join("")}
+      </tbody></table></div>
+      ${aAjouter.length>MAX?`<p class="hint">… et ${aAjouter.length-MAX} autre(s) non affichée(s) ici (toutes seront importées).</p>`:""}
+    `:`<div class="empty">Aucune nouvelle transaction à importer${doublons?` (${doublons} doublon(s) déjà présent(s))`:""}.</div>`}
+  `;
+  q("#btnConfirmerImport",b=>b.onclick=confirmerImport);
+  q("#btnAnnulerImport",b=>b.onclick=annulerImport);
+}
+
+function confirmerImport(){
+  if(!importEnAttente) return;
+  const {aAjouter, doublons}=importEnAttente;
+  aAjouter.forEach(t=>etat.transactions.push(t));
+  sauver();
+  const n=aAjouter.length; importEnAttente=null;
+  const zone=document.getElementById("apercuImport"); if(zone) zone.style.display="none";
+  toast(`${n} transaction(s) importée(s)${doublons?`, ${doublons} doublon(s) ignoré(s)`:""}`);
+}
+
+function annulerImport(){
+  importEnAttente=null;
+  const zone=document.getElementById("apercuImport"); if(zone) zone.style.display="none";
+  toast("Import annulé — rien n'a été enregistré");
 }
 
 /* ============================================================
@@ -1298,6 +1375,44 @@ document.getElementById("btnExport").onclick=()=>{
   a.download=`mon-budget-${new Date().toISOString().slice(0,10)}.json`;
   a.click(); URL.revokeObjectURL(a.href); toast("Sauvegarde JSON exportée");
 };
+/* Valide et assainit un état importé (JSON) AVANT toute persistance.
+   Objectif : ne jamais écrire un état corrompu dans localStorage (sinon l'app
+   crashe au rechargement et devient inutilisable, avec perte de données).
+   Lève une exception si la structure est irrécupérable ; sinon renvoie un
+   état propre (champs manquants complétés, entrées invalides écartées). */
+function assainirEtatImporte(data){
+  if(!data || typeof data!=="object" || Array.isArray(data)) throw new Error("format inattendu");
+  const base=etatDefaut();
+  const e=Object.assign(base, data);
+  e.categories = (Array.isArray(e.categories) && e.categories.length)
+    ? e.categories.filter(c=>c && typeof c.nom==="string")
+        .map(c=>({nom:String(c.nom), type:String(c.type||"depense"), couleur:String(c.couleur||"#6b7684")}))
+    : base.categories;
+  e.regles = Array.isArray(e.regles)
+    ? e.regles.filter(r=>r && typeof r.motcle==="string" && typeof r.categorie==="string")
+        .map(r=>({motcle:String(r.motcle), categorie:String(r.categorie)}))
+    : base.regles;
+  if(!Array.isArray(e.transactions)) throw new Error("« transactions » doit être une liste");
+  e.transactions = e.transactions
+    .filter(t=>t && typeof t.date==="string" && /^\d{4}-\d{2}-\d{2}/.test(t.date) && isFinite(Number(t.montant)))
+    .map(t=>({
+      id:(typeof t.id==="string" && t.id) ? t.id : uid(),
+      date:t.date.slice(0,10),
+      libelle:String(t.libelle||"").slice(0,200),
+      montant:Number(t.montant),
+      categorie:(typeof t.categorie==="string") ? t.categorie : "Non classé",
+      source:String(t.source||"import")
+    }));
+  const b={};
+  if(e.budgets && typeof e.budgets==="object" && !Array.isArray(e.budgets)){
+    for(const k in e.budgets){ const v=Number(e.budgets[k]); if(isFinite(v)) b[String(k)]=v; }
+  }
+  e.budgets=b;
+  e.devise=(typeof e.devise==="string" && e.devise.trim()) ? e.devise.trim() : "€";
+  e.theme=(e.theme==="light") ? "light" : "dark";
+  e.annee=Number.isFinite(+e.annee) ? +e.annee : new Date().getFullYear();
+  return e;
+}
 /* Import JSON */
 document.getElementById("btnImportJson").onclick=()=>{
   const inp=document.createElement("input"); inp.type="file"; inp.accept=".json";
@@ -1305,9 +1420,10 @@ document.getElementById("btnImportJson").onclick=()=>{
     const f=inp.files[0]; if(!f)return;
     const r=new FileReader();
     r.onload=()=>{ try{
-      const data=JSON.parse(r.result);
-      etat=Object.assign(etatDefaut(),data); sauver(); appliquerTheme(); render(); toast("Sauvegarde JSON importée");
-    }catch(err){toast("Fichier JSON invalide");}};
+      const propre=assainirEtatImporte(JSON.parse(r.result));   // valide AVANT de toucher à l'état
+      if(!confirm("Importer cette sauvegarde ? Elle remplace vos données actuelles (catégories, règles, transactions, budgets).")) return;
+      etat=propre; sauver(); appliquerTheme(); render(); toast("Sauvegarde JSON importée");
+    }catch(err){ toast("Fichier JSON invalide"+(err && err.message ? " : "+err.message : "")); }};
     r.readAsText(f);
   };
   inp.click();
