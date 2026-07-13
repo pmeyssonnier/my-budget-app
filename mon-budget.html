@@ -296,6 +296,7 @@ const CATS_DEFAUT = [
   {nom:"Crédit conso",       type:"credit",  couleur:"#8a6bb5"},
   {nom:"Épargne",            type:"epargne", couleur:"#5b8fc7"},
   {nom:"Investissements",    type:"epargne", couleur:"#4d7fb8"},
+  {nom:"Copropriété",        type:"frais",   couleur:"#c99a5b"},
   {nom:"Virements internes", type:"depense", couleur:"#7d8ba0"},
   {nom:"Non classé",         type:"depense", couleur:"#6b7684"},
 ];
@@ -305,10 +306,13 @@ const CATS_DEFAUT = [
    matche = gagnante, donc les règles les plus spécifiques (IBAN) sont en tête.
    Éditable dans l'onglet. */
 const REGLES_DEFAUT = [
-  // Virements internes : IBAN de mes propres comptes. En premier car un IBAN exact
-  // prime sur un mot-clé fuzzy (ex. « CHARGES COMMUNES » ne doit pas l'emporter),
-  // et le nom du titulaire figurant sur chaque paiement carte rendrait un repérage
-  // par nom inutilisable.
+  // Copropriété : les charges communes partent sur le compte joint (IBAN interne)
+  // mais sont une vraie dépense. Cette règle est AVANT la règle IBAN interne pour
+  // qu'elle l'emporte sur ce mouvement précis.
+  {motcle:"charges communes", categorie:"Copropriété"},
+  // Virements internes : IBAN de mes propres comptes. Un IBAN exact prime sur un
+  // mot-clé fuzzy ; et le nom du titulaire figurant sur chaque paiement carte
+  // rendrait un repérage par nom inutilisable.
   {motcle:"BE08 0657 8497 4513", categorie:"Virements internes"},
   {motcle:"BE81 6511 3459 9024", categorie:"Virements internes"},
   {motcle:"BE67 0639 3621 0487", categorie:"Virements internes"},
@@ -404,6 +408,22 @@ function migrerEtat(e){
       }
     }
   });
+  // Copropriété : les charges communes vont sur le compte joint (IBAN interne) mais
+  // sont une vraie dépense. La règle passe DEVANT les IBAN (unshift en dernier) pour
+  // l'emporter, et on reclasse ces mouvements même s'ils étaient marqués « internes ».
+  if(!e.categories.some(c=>c.nom==="Copropriété")){
+    const iVI = e.categories.findIndex(c=>c.nom==="Virements internes");
+    const cat = {nom:"Copropriété", type:"frais", couleur:"#c99a5b"};
+    if(iVI>=0) e.categories.splice(iVI,0,cat); else e.categories.push(cat);
+  }
+  if(!e.regles.some(r=>norm(r.motcle)==="charges communes")){
+    e.regles.unshift({motcle:"charges communes", categorie:"Copropriété"});
+    if(Array.isArray(e.transactions)){
+      e.transactions.forEach(t=>{
+        if(t && norm(t.libelle).includes("charges communes")) t.categorie="Copropriété";
+      });
+    }
+  }
   return e;
 }
 function sauver(){
